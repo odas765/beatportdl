@@ -519,17 +519,11 @@ func (app *application) handleReleaseLink(inst *beatport.Beatport, link *beatpor
 		return
 	}
 
-	tracks, err := inst.GetTracksFromRelease(release)
-	if err != nil {
-		app.errorLogWrapper(link.Original, "fetch release tracks", err)
-		return
-	}
-
 	wg := sync.WaitGroup{}
-	for _, track := range tracks {
-		track.Release = *release
-
+	err = ForPaginated[beatport.Track](release.ID, "", inst.GetReleaseTracks, func(track beatport.Track, i int) error {
 		app.downloadWorker(&wg, func() {
+			track.Release = *release
+
 			var cover string
 			if app.requireCover(true, true) {
 				cover, err = app.downloadCover(release.Image, releaseDir)
@@ -538,7 +532,7 @@ func (app *application) handleReleaseLink(inst *beatport.Beatport, link *beatpor
 				}
 			}
 
-			if err := app.handleTrack(inst, track, releaseDir, cover); err != nil {
+			if err := app.handleTrack(inst, &track, releaseDir, cover); err != nil {
 				app.errorLogWrapper(link.Original, "handle release track", err)
 				os.Remove(cover)
 				return
@@ -549,7 +543,14 @@ func (app *application) handleReleaseLink(inst *beatport.Beatport, link *beatpor
 				return
 			}
 		})
+		return nil
+	})
+
+	if err != nil {
+		app.errorLogWrapper(link.Original, "handle release tracks", err)
+		return
 	}
+
 	wg.Wait()
 }
 
