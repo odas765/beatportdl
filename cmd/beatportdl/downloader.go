@@ -474,9 +474,10 @@ func (app *application) handleTrackLink(inst *beatport.Beatport, link *beatport.
 	}
 	track.Release = *release
 
-	downloadsDir, err := app.setupDownloadsDirectory(app.config.DownloadsDirectory, release)
-	if err != nil {
-		app.errorLogWrapper(link.Original, "setup downloads directory", err)
+	// ✅ Custom folder: /downloads/{trackID}/
+	trackDir := filepath.Join(app.config.DownloadsDirectory, fmt.Sprintf("%d", track.ID))
+	if err := os.MkdirAll(trackDir, os.ModePerm); err != nil {
+		app.errorLogWrapper(link.Original, "create track directory", err)
 		return
 	}
 
@@ -484,13 +485,13 @@ func (app *application) handleTrackLink(inst *beatport.Beatport, link *beatport.
 	app.downloadWorker(&wg, func() {
 		var cover string
 		if app.requireCover(true, true) {
-			cover, err = app.downloadCover(track.Release.Image, downloadsDir)
+			cover, err = app.downloadCover(track.Release.Image, trackDir)
 			if err != nil {
-				app.errorLogWrapper(link.Original, "download track release cover", err)
+				app.errorLogWrapper(link.Original, "download track cover", err)
 			}
 		}
 
-		if err := app.handleTrack(inst, track, downloadsDir, cover); err != nil {
+		if err := app.handleTrack(inst, track, trackDir, cover); err != nil {
 			app.errorLogWrapper(link.Original, "handle track", err)
 			os.Remove(cover)
 			return
@@ -502,8 +503,6 @@ func (app *application) handleTrackLink(inst *beatport.Beatport, link *beatport.
 		}
 	})
 	wg.Wait()
-
-	app.cleanup(downloadsDir)
 }
 
 func (app *application) handleReleaseLink(inst *beatport.Beatport, link *beatport.Link) {
@@ -513,53 +512,45 @@ func (app *application) handleReleaseLink(inst *beatport.Beatport, link *beatpor
 		return
 	}
 
-	downloadsDir, err := app.setupDownloadsDirectory(app.config.DownloadsDirectory, release)
-	if err != nil {
-		app.errorLogWrapper(link.Original, "setup downloads directory", err)
+	// ✅ Custom folder: /downloads/{releaseID}/{releaseName}/
+	releaseDir := filepath.Join(app.config.DownloadsDirectory, fmt.Sprintf("%d", release.ID), release.Name.String())
+	if err := os.MkdirAll(releaseDir, os.ModePerm); err != nil {
+		app.errorLogWrapper(link.Original, "create release directory", err)
 		return
 	}
 
-	var cover string
-	if app.requireCover(true, true) {
-		app.semAcquire(app.downloadSem)
-		cover, err = app.downloadCover(release.Image, downloadsDir)
-		if err != nil {
-			app.errorLogWrapper(link.Original, "download release cover", err)
-		}
-		app.semRelease(app.downloadSem)
+	tracks, err := inst.GetTracksFromRelease(release)
+	if err != nil {
+		app.errorLogWrapper(link.Original, "fetch release tracks", err)
+		return
 	}
 
 	wg := sync.WaitGroup{}
-	for _, trackUrl := range release.TrackUrls {
+	for _, track := range tracks {
+		track.Release = *release
+
 		app.downloadWorker(&wg, func() {
-			trackLink, err := inst.ParseUrl(trackUrl)
-			if err != nil {
-				app.errorLogWrapper(link.Original, "parse track url", err)
+			var cover string
+			if app.requireCover(true, true) {
+				cover, err = app.downloadCover(release.Image, releaseDir)
+				if err != nil {
+					app.errorLogWrapper(link.Original, "download release cover", err)
+				}
+			}
+
+			if err := app.handleTrack(inst, track, releaseDir, cover); err != nil {
+				app.errorLogWrapper(link.Original, "handle release track", err)
+				os.Remove(cover)
 				return
 			}
 
-			track, err := inst.GetTrack(trackLink.ID)
-			if err != nil {
-				app.errorLogWrapper(trackUrl, "fetch release track", err)
-				return
-			}
-			trackStoreUrl := track.StoreUrl()
-			track.Release = *release
-
-			if err := app.handleTrack(inst, track, downloadsDir, cover); err != nil {
-				app.errorLogWrapper(trackStoreUrl, "handle track", err)
+			if err := app.handleCoverFile(cover); err != nil {
+				app.errorLogWrapper(link.Original, "handle cover file", err)
 				return
 			}
 		})
 	}
 	wg.Wait()
-
-	if err := app.handleCoverFile(cover); err != nil {
-		app.errorLogWrapper(link.Original, "handle cover file", err)
-		return
-	}
-
-	app.cleanup(downloadsDir)
 }
 
 func (app *application) handlePlaylistLink(inst *beatport.Beatport, link *beatport.Link) {
